@@ -32,6 +32,7 @@ cfg.results_dir  = fullfile(cfg.data_root, 'results');
 cfg.disturbance_file      = fullfile(cfg.data_root, 'Disturbance Rejection Test', '0%', 'TPU0S1D.csv');
 cfg.transmissibility_file = fullfile(cfg.data_root, 'Transmissibility test', '0%', 'TPU0S1T.csv');
 cfg.plot_T_re_im = true;  % plot Re and Im of that transmissibility FRF against frequency (two figures)
+cfg.plot_smooth_points = 11; % smoothing of those two plots only: quadratic Savitzky-Golay window [bins, odd]; 1 = raw data
 cfg.make_figures = true;
 cfg.run_mode     = 'batch'; % 'batch' | 'legacy'
 % legacy mode only (original hard-coded values kept as defaults)
@@ -84,7 +85,11 @@ if cfg.plot_T_re_im
     [~, name_T] = fileparts(cfg.transmissibility_file);
     line_col = [42 120 214]/255;                  % single series: one hue
     zero_col = [0.55 0.55 0.55];
-    comp  = {Re_T, Im_T};
+    % smoothing for the plots only (same quadratic Savitzky-Golay filter as the T analysis); Re_T, Im_T stay raw
+    m = floor(cfg.plot_smooth_points/2); sg = (3*(3*m^2 + 3*m - 1) - 15*(-m:m)'.^2)/((2*m + 1)*(4*m^2 + 4*m - 3));
+    Re_T_plot = conv(Re_T, sg, 'same'); Re_T_plot([1:m, end-m+1:end]) = Re_T([1:m, end-m+1:end]);   % edge bins unsmoothed
+    Im_T_plot = conv(Im_T, sg, 'same'); Im_T_plot([1:m, end-m+1:end]) = Im_T([1:m, end-m+1:end]);
+    comp  = {Re_T_plot, Im_T_plot};
     ylab  = {'Real component  Re = A cos(\phi)  [-]', 'Imaginary component  Im = A sin(\phi)  [-]'};
     ttl   = {'real component', 'imaginary component'};
     for k = 1:2
@@ -96,7 +101,8 @@ if cfg.plot_T_re_im
         xlim([freq_T(1) freq_T(end)]);
         xlabel('Frequency [Hz]');
         ylabel(ylab{k});
-        title(sprintf('%s transmissibility FRF: %s', name_T, ttl{k}), 'Interpreter', 'none');
+        if m > 0, sm_txt = sprintf(' (smoothed: %d-point Savitzky-Golay)', 2*m + 1); else, sm_txt = ''; end
+        title(sprintf('%s transmissibility FRF: %s%s', name_T, ttl{k}, sm_txt), 'Interpreter', 'none');
     end
 end
 
