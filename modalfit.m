@@ -1,8 +1,23 @@
 function [x] = modalfit(freq,real_filtered,imag_filtered,x0)
 %MODALFIT: This function optimizes the input modal parameters, solved via
 %peak picking, for a given frequency response function (FRF).
+%   x0 = [wn_1 k_1 zeta_1 wn_2 k_2 zeta_2 ...]  (wn in rad/s, k in N/m)
+%   freq in Hz; real_filtered / imag_filtered = receptance [m/N] in the
+%   textbook sign convention (Im < 0 at resonance).
 
-options = optimoptions('lsqnonlin','Display','iter','FunValCheck','on','TolFun',1e-15);
+% Force row vectors: with column inputs, Q_R_total (row) - X_F (column)
+% silently broadcast to an N x N matrix.
+freq = freq(:).';
+real_filtered = real_filtered(:).';
+imag_filtered = imag_filtered(:).';
+x0 = x0(:).';
+
+if exist('optimoptions', 'file') || exist('optimoptions', 'builtin')
+    options = optimoptions('lsqnonlin','Display','iter','FunValCheck','on','TolFun',1e-15);
+else
+    % GNU Octave (optim package) has lsqnonlin but no optimoptions
+    options = optimset('Display','iter','FunValCheck','on','TolFun',1e-15);
+end
 d = size(x0);
 numrows = d(1);
 numcols = d(2);
@@ -17,8 +32,10 @@ for cnt1 = 1:num_modes
 end
 
 x = lsqnonlin(@obj_fct,x0,lb,ub,options);
+x = reshape(x, size(x0));           % Octave's lsqnonlin returns a column
     
     function [y] = obj_fct(x)
+        x = x(:).';                     % Octave passes x as a column; indexing below is x(1, k)
         w = freq*2*pi;                  % frequency vector, [Hz]
         Q_R_total = zeros(1,length(freq));
         

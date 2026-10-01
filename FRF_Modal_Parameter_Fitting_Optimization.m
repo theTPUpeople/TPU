@@ -1,15 +1,56 @@
 clc
-clear all 
+clear all
 close all
 
-% Load FRF data ( Freq, Real, Imag)
-cd('H:\Boeing Project\Data\Dynamometer Transfer Functions\Makino Mounted without Aluminum Plate')
-load('dyna_tf_makino_no_AL_plate_Z.mat')
+%% ========================= CONFIGURATION (edit only here) =========================
+% Peak-picking modal fit after Schmitz & Smith, Machining Dynamics 2nd ed.,
+% Sec. 2.5.1 (Fig. 2.21, Eqs. 2.58-2.63). 'batch' runs the QuickDAQ CSV
+% pipeline over all TPU specimens (tpu_modal_batch.m); 'legacy' runs the
+% original single-FRF workflow below on a .mat file with Freq, Real, Imag.
+cfg.m_known_kg   = NaN;   % TODO: preload mass in kg (plates + accelerometer). Static preload target 1.1 kN gives about 112 kg; verify actual.
+cfg.frf_type     = 'auto'; % 'auto' infers from file/headers; override if wrong ('accelerance' | 'receptance', force-input test only)
+cfg.n_modes      = 2;
+cfg.min_prominence = [];  % tune on real data. Absolute prominence of the Im(H_rec) minima [m/N]; [] -> min_prominence_rel*max|Im|
+cfg.min_prominence_rel = 0.05; % used when min_prominence = [] (also for |T| peaks)
+cfg.polarity     = 'auto'; % 'auto' | +1 | -1 : sign giving Im(H_rec) < 0 at resonance (textbook Fig. 2.21 convention)
+cfg.f_band_Hz    = [30 500]; % analysis band [Hz]. From 30 Hz up >= 95 % of D-test bins have coherence >= 0.75 (58 % at 15-25 Hz);
+                            % below 30 Hz 98-100 % of T-test bins fail it. /w^2 amplifies low-frequency noise.
+cfg.min_coherence = 0.75; % points with lower coherence are skipped (threshold used in the T spreadsheets' "Coherence valid?" column)
+cfg.smooth_points = 1;    % D test: centred moving average length on the complex FRF (1 = off, like the original windowSize = 1);
+                          % measured |H| scatter 0.9 % median / 1.75 % max, inside the validated 1-2 % range
+cfg.smooth_points_T = 11;      % T test only: |T| scatter is 3-16 % per bin (median 6 %). Unsmoothed, half-power zeta is biased
+cfg.smooth_method_T = 'sgolay'; % -14..-19 % and missing in 55-86 % of Monte-Carlo runs; quadratic Savitzky-Golay over 11 bins gave
+                               % zeta RMS 6-9 % at 6 % scatter with 2.5-6 % noise-free bias (box-7: 9-17 % bias)
+cfg.peak_refine  = 'sdof'; % sub-bin refinement of points 1-6: 'sdof' (parabola in SDOF-symmetric coordinates) | 'none' (raw bins) | h (parabola over +/- h bins)
+cfg.real_search_frac = 0.5; % Re max/min searched within w_n*(1 -/+ frac), clipped at neighbouring modes
+cfg.disagree_pct = 15;    % cross-check tolerance [%] (methods and D vs T)
+cfg.phase_units  = 'auto'; % 'auto' | 'deg' | 'rad' (QuickDAQ headers do not state it)
+cfg.data_root    = fileparts(mfilename('fullpath'));
+if isempty(cfg.data_root), cfg.data_root = pwd; end
+cfg.results_dir  = fullfile(cfg.data_root, 'results');
+cfg.make_figures = true;
+cfg.run_mode     = 'batch'; % 'batch' | 'legacy'
+% legacy mode only (original hard-coded values kept as defaults)
+cfg.legacy_mat_file   = 'H:\Boeing Project\Data\Dynamometer Transfer Functions\Makino Mounted without Aluminum Plate\dyna_tf_makino_no_AL_plate_Z.mat';
+cfg.legacy_peak_index = []; % [] -> prompt for peaks as before; e.g. [1 2] runs non-interactively
+cfg.legacy_fig_dir    = ''; % original: 'H:\Boeing Project\Journal Papers\ASPE Journal\Cutting Force Coefficient Paper\Inverse Filter Code and Figures'
+%% ====================================================================================
+addpath(cfg.data_root);
 
-freq = Freq;
+if strcmpi(cfg.run_mode, 'batch')
+    [results, xcheck] = tpu_modal_batch(cfg);
+    return
+end
+
+%% ---------------- legacy mode: original single-FRF workflow ----------------
+% Load FRF data ( Freq, Real, Imag)
+load(cfg.legacy_mat_file)
+
+% row vectors throughout (column data broadcast to N x N further down)
+freq = Freq(:).';
 omega = freq*2*pi;
-real_X_F_measured = Real;
-imag_X_F_measured = Imag;
+real_X_F_measured = Real(:).';
+imag_X_F_measured = Imag(:).';
 clearvars Real1 Imag1 Freq1
 
 figure(1)
@@ -37,8 +78,10 @@ windowSize = 1;
 b = (1/windowSize)*ones(1,windowSize);
 a = 1;                                      % denominator coefficient
  
-real_filtered = filter(b,a,real_X_F_measured);
-imag_filtered = filter(b,a,imag_X_F_measured);
+% centred moving average: filter() is causal and shifts peaks by
+% (windowSize-1)/2 bins when windowSize > 1 (identical for windowSize = 1)
+real_filtered = conv(real_X_F_measured, b, 'same');
+imag_filtered = conv(imag_X_F_measured, b, 'same');
 
 %**************************************************************************
 % Remove all FRF data below 'minumum FRF frequency' due to integration
@@ -54,7 +97,7 @@ real_filtered = real_filtered(Freq_index);
 imag_filtered = imag_filtered(Freq_index);
 
 mag_X_F_measured = sqrt(real_filtered.^2 + imag_filtered.^2);
-phase_X_F_measured = atan2(imag_filtered,real_filtered)/2/pi;
+phase_X_F_measured = atan2(imag_filtered,real_filtered)*(180/pi);   % [deg] (was /2/pi = cycles, plotted against degrees in Fig. 8)
 
 figure(2)
 subplot(211)
@@ -78,6 +121,10 @@ ylim([-30 1])
 %**************************************************************************
 % Find local minima of the Imaginary part of the FRF to identify natural
 % frequencies
+if max(imag_filtered) > abs(min(imag_filtered))
+    warning('FRF:polarity', ['Im(FRF) is mostly positive: the sign is inverted relative to the textbook ', ...
+        'convention (Im < 0 at resonance). Multiply Real and Imag by -1 before peak picking.']);
+end
 [imag_pks,imag_locs] = findpeaks(-imag_filtered,'MinPeakDistance',5,'MinPeakHeight',0.01*max(-imag_filtered));
 imag_pks = -imag_pks;                                                                       
 natural_freqs = freq(imag_locs);                                                          % create a vector of natural frequencies [Hz]
@@ -92,12 +139,17 @@ xlim([minFreq maxFreq])
 
 %**************************************************************************
 % Prompt the user to enter the number of DOFs to be modeled.
-prompt = 'Enter the number of peaks from Figure 3 to be used.';
-num_DOF = input(prompt);
+if isempty(cfg.legacy_peak_index)
+    prompt = 'Enter the number of peaks from Figure 3 to be used.';
+    num_DOF = input(prompt);
 
-for cnt = 1:num_DOF
-   prompt = 'Enter the number of the peak to be kept.';
-   index(cnt) = input(prompt);
+    for cnt = 1:num_DOF
+       prompt = 'Enter the number of the peak to be kept.';
+       index(cnt) = input(prompt);
+    end
+else
+    index = cfg.legacy_peak_index;
+    num_DOF = numel(index);
 end
 
 natural_freqs = natural_freqs(index);            % create a vector of natural frequencies [Hz]
@@ -124,12 +176,19 @@ for cnt1 = 1:num_modes
     fn(cnt1) = natural_freqs(pos);                                                              % assigns the frequency of the peak (natural frequency)
     A(cnt1) = val;                                                                              % assigns the amplitude of the peak
     
-    if pos == 1
+    % (each if/elseif pair below was missing the tie case, leaving f_lower /
+    % f_upper undefined or stale; the elseif's are now else's. A single mode
+    % indexed natural_freqs(pos + 1) out of range; it now uses the full band.)
+    if num_modes == 1
+        f_lower = min(freq);
+        f_upper = max(freq);
+
+    elseif pos == 1
         if abs((natural_freqs(pos + 1) - natural_freqs(pos))*0.40) < abs(natural_freqs(pos) - min(freq)) 
             f_lower = natural_freqs(pos) - ((natural_freqs(pos + 1) - natural_freqs(pos))*0.40);
             f_upper = natural_freqs(pos) + ((natural_freqs(pos + 1) - natural_freqs(pos))*0.40);
             
-        elseif abs(natural_freqs(pos) - min(freq)) < abs((natural_freqs(pos + 1) - natural_freqs(pos))*0.40)
+        else
             f_lower = min(freq);
             f_upper = natural_freqs(pos) + (natural_freqs(pos) - min(freq));
             
@@ -140,7 +199,7 @@ for cnt1 = 1:num_modes
             f_lower = natural_freqs(pos) - ((natural_freqs(pos) - natural_freqs(pos - 1)) * 0.40);
             f_upper = natural_freqs(pos) + ((natural_freqs(pos) - natural_freqs(pos - 1)) * 0.40);
             
-        elseif abs(max(freq) - natural_freqs(pos)) < abs((natural_freqs(pos) - natural_freqs(pos-1))*0.40)
+        else
             f_lower = natural_freqs(pos) - (max(freq) - natural_freqs(pos));
             f_upper = max(freq);
             
@@ -151,7 +210,7 @@ for cnt1 = 1:num_modes
             f_lower = natural_freqs(pos) - ((natural_freqs(pos) - natural_freqs(pos - 1)) * 0.40);
             f_upper = natural_freqs(pos) + ((natural_freqs(pos) - natural_freqs(pos - 1))*0.40);
             
-        elseif abs((natural_freqs(pos + 1) - natural_freqs(pos))*0.40) < abs((natural_freqs(pos) - natural_freqs(pos - 1))*0.40)
+        else
             f_lower = natural_freqs(pos) - ((natural_freqs(pos + 1) - natural_freqs(pos))*0.40);
             f_upper = natural_freqs(pos) + ((natural_freqs(pos + 1) - natural_freqs(pos))*0.40);
             
@@ -251,8 +310,7 @@ legend('Measured FRF','Modal Fit')
 xlabel('Frequency [Hz]')
 ylabel('Phase [deg]')
 %%
-cd('H:\Boeing Project\Matlab Toolbox\FRF Modal Parameter Fitting')
-[x] = modalfit(freq,real_filtered,imag_filtered,x0)
+[x] = modalfit(freq,real_filtered,imag_filtered,x0)          % modalfit.m sits next to this script
 
 Q_R_total = zeros(1,length(freq));
 
@@ -292,7 +350,7 @@ xlabel('Frequency (Hz)')
 ylabel('Imaginary (N/N)')
 % xlim([1900 2100])
 
-cd('H:\Boeing Project\Journal Papers\ASPE Journal\Cutting Force Coefficient Paper\Inverse Filter Code and Figures');
+if ~isempty(cfg.legacy_fig_dir), cd(cfg.legacy_fig_dir); end
 
 figure(10)
 subplot(211)
@@ -306,5 +364,5 @@ subplot(212)
 plot(freq, X_F_Phase, freq,phase_Q_R_total, freq, Q_R_Phase)
 set(gca,'FontSize', 14)
 xlabel('Frequency (Hz)')
-ylabel('Phase (char(176))')
+ylabel(['Phase (' char(176) ')'])
 
