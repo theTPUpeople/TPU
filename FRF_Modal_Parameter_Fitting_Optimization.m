@@ -31,6 +31,7 @@ cfg.results_dir  = fullfile(cfg.data_root, 'results');
 % one specimen of each test, read at the top of this script (CSV exports, open in Excel)
 cfg.disturbance_file      = fullfile(cfg.data_root, 'Disturbance Rejection Test', '0%', 'TPU0S1D.csv');
 cfg.transmissibility_file = fullfile(cfg.data_root, 'Transmissibility test', '0%', 'TPU0S1T.csv');
+cfg.plot_T_re_im = true;  % plot Re and Im of that transmissibility FRF against frequency (two figures)
 cfg.make_figures = true;
 cfg.run_mode     = 'batch'; % 'batch' | 'legacy'
 % legacy mode only (original hard-coded values kept as defaults)
@@ -77,6 +78,27 @@ Im_T        = A_T.*sin(phase_T_rad);        % Im = A sin(phase)
 
 fprintf('Read %d points from %s and %d points from %s (phase deg -> rad, Re = A cos, Im = A sin)\n', ...
     numel(freq_D), cfg.disturbance_file, numel(freq_T), cfg.transmissibility_file);
+
+% Real and imaginary components of the transmissibility FRF versus frequency
+if cfg.plot_T_re_im
+    [~, name_T] = fileparts(cfg.transmissibility_file);
+    line_col = [42 120 214]/255;                  % single series: one hue
+    zero_col = [0.55 0.55 0.55];
+    comp  = {Re_T, Im_T};
+    ylab  = {'Real component  Re = A cos(\phi)  [-]', 'Imaginary component  Im = A sin(\phi)  [-]'};
+    ttl   = {'real component', 'imaginary component'};
+    for k = 1:2
+        figure('Color', 'w', 'Name', [name_T ' ' ttl{k}]);
+        plot(freq_T, comp{k}, '-', 'Color', line_col, 'LineWidth', 1.5); hold on
+        plot([freq_T(1) freq_T(end)], [0 0], ':', 'Color', zero_col);
+        grid on; box on
+        set(gca, 'FontSize', 12);
+        xlim([freq_T(1) freq_T(end)]);
+        xlabel('Frequency [Hz]');
+        ylabel(ylab{k});
+        title(sprintf('%s transmissibility FRF: %s', name_T, ttl{k}), 'Interpreter', 'none');
+    end
+end
 
 if strcmpi(cfg.run_mode, 'batch')
     [results, xcheck] = tpu_modal_batch(cfg);
