@@ -24,18 +24,59 @@ cfg.smooth_method_T = 'sgolay'; % -14..-19 % and missing in 55-86 % of Monte-Car
 cfg.peak_refine  = 'sdof'; % sub-bin refinement of points 1-6: 'sdof' (parabola in SDOF-symmetric coordinates) | 'none' (raw bins) | h (parabola over +/- h bins)
 cfg.real_search_frac = 0.5; % Re max/min searched within w_n*(1 -/+ frac), clipped at neighbouring modes
 cfg.disagree_pct = 15;    % cross-check tolerance [%] (methods and D vs T)
-cfg.phase_units  = 'auto'; % 'auto' | 'deg' | 'rad' (QuickDAQ headers do not state it)
+cfg.phase_units  = 'deg';  % phase angles in the exports are in degrees ('auto' | 'deg' | 'rad')
 cfg.data_root    = fileparts(mfilename('fullpath'));
 if isempty(cfg.data_root), cfg.data_root = pwd; end
 cfg.results_dir  = fullfile(cfg.data_root, 'results');
+% one specimen of each test, read at the top of this script (CSV exports, open in Excel)
+cfg.disturbance_file      = fullfile(cfg.data_root, 'Disturbance Rejection Test', '0%', 'TPU0S1D.csv');
+cfg.transmissibility_file = fullfile(cfg.data_root, 'Transmissibility test', '0%', 'TPU0S1T.csv');
 cfg.make_figures = true;
 cfg.run_mode     = 'batch'; % 'batch' | 'legacy'
 % legacy mode only (original hard-coded values kept as defaults)
+cfg.legacy_source     = 'csv'; % 'csv': FRF extracted at the top of this script | 'mat': original .mat with Freq, Real, Imag
+cfg.legacy_test       = 'D';   % with 'csv': 'D' disturbance rejection | 'T' transmissibility
 cfg.legacy_mat_file   = 'H:\Boeing Project\Data\Dynamometer Transfer Functions\Makino Mounted without Aluminum Plate\dyna_tf_makino_no_AL_plate_Z.mat';
 cfg.legacy_peak_index = []; % [] -> prompt for peaks as before; e.g. [1 2] runs non-interactively
 cfg.legacy_fig_dir    = ''; % original: 'H:\Boeing Project\Journal Papers\ASPE Journal\Cutting Force Coefficient Paper\Inverse Filter Code and Figures'
 %% ====================================================================================
 addpath(cfg.data_root);
+
+%% ------------- FRF magnitude and phase from the CSV (Excel) exports -------------
+% QuickDAQ exports: 9 header lines, numbers from line 10 on. Column layout:
+%   Disturbance rejection: 1 Frequency [Hz] | 2 FRF magnitude [m/s^2/N] | 3 FRF phase [deg] | 4 coherence
+%   Transmissibility:      1 Frequency [Hz] | 2 coherence | 3 FRF magnitude [-]     | 4 FRF phase [deg]
+% The "Measurement Type" header line (line 5) is checked so a different layout stops here.
+hdr_D = regexp(fileread(cfg.disturbance_file), '\r?\n', 'split');
+hdr_T = regexp(fileread(cfg.transmissibility_file), '\r?\n', 'split');
+lay_D = 'Measurement Type,FRF,,Coherence';
+lay_T = 'Measurement Type,Coherence,FRF';
+if ~strncmp(hdr_D{5}, lay_D, numel(lay_D)) || ~strncmp(hdr_T{5}, lay_T, numel(lay_T))
+    error('FRF:layout', 'Column layout differs from the QuickDAQ export expected here; check line 5 of the files.');
+end
+
+% Disturbance rejection (force input, acceleration output)
+data_D      = dlmread(cfg.disturbance_file, ',', 9, 0);   % numeric block, 9 header lines skipped
+freq_D      = data_D(:, 1);                 % frequency [Hz]
+A_D         = data_D(:, 2);                 % FRF magnitude A [m/s^2/N]
+phase_D_deg = data_D(:, 3);                 % FRF phase [deg]
+coh_D       = data_D(:, 4);                 % coherence
+phase_D_rad = phase_D_deg*pi/180;           % phase [rad]
+Re_D        = A_D.*cos(phase_D_rad);        % Re = A cos(phase)
+Im_D        = A_D.*sin(phase_D_rad);        % Im = A sin(phase)
+
+% Transmissibility (base acceleration input, mass acceleration output)
+data_T      = dlmread(cfg.transmissibility_file, ',', 9, 0);
+freq_T      = data_T(:, 1);                 % frequency [Hz]
+coh_T       = data_T(:, 2);                 % coherence
+A_T         = data_T(:, 3);                 % FRF magnitude A [-]
+phase_T_deg = data_T(:, 4);                 % FRF phase [deg]
+phase_T_rad = phase_T_deg*pi/180;           % phase [rad]
+Re_T        = A_T.*cos(phase_T_rad);        % Re = A cos(phase)
+Im_T        = A_T.*sin(phase_T_rad);        % Im = A sin(phase)
+
+fprintf('Read %d points from %s and %d points from %s (phase deg -> rad, Re = A cos, Im = A sin)\n', ...
+    numel(freq_D), cfg.disturbance_file, numel(freq_T), cfg.transmissibility_file);
 
 if strcmpi(cfg.run_mode, 'batch')
     [results, xcheck] = tpu_modal_batch(cfg);
@@ -44,7 +85,36 @@ end
 
 %% ---------------- legacy mode: original single-FRF workflow ----------------
 % Load FRF data ( Freq, Real, Imag)
-load(cfg.legacy_mat_file)
+if strcmpi(cfg.legacy_source, 'mat')
+    load(cfg.legacy_mat_file)
+else
+    % FRF extracted from the CSV exports at the top of this script
+    if strcmpi(cfg.legacy_test, 'T')
+        Freq = freq_T; Real = Re_T; Imag = Im_T;
+        warning('FRF:legacyT', ['Transmissibility is dimensionless (no force): k_q, m_q, c_q from ', ...
+            'Eqs. 2.60-2.63 are not physical for T; only fn and zeta are meaningful.']);
+    else
+        keep = freq_D > 0;                                    % w = 0 cannot be divided by
+        Freq = freq_D(keep); Real = Re_D(keep); Imag = Im_D(keep);
+        is_acc = strcmpi(cfg.frf_type, 'accelerance') || (strcmpi(cfg.frf_type, 'auto') && ...
+            ~isempty(strfind(strrep(hdr_D{8}, ' ', ''), 'm/s^2/N')));
+        if is_acc
+            % accelerance -> receptance: Eqs. 2.58-2.63 assume displacement/force
+            H_rec = (Real + 1i*Imag)./(-(2*pi*Freq).^2);
+            Real = real(H_rec); Imag = imag(H_rec);
+            fprintf('legacy: H_rec = H_acc/(-w^2) applied\n');
+        end
+    end
+    % sign convention of textbook Fig. 2.21 (Im < 0 at resonance), checked inside the analysis band
+    if ischar(cfg.polarity)
+        inb = Freq >= cfg.f_band_Hz(1) & Freq <= cfg.f_band_Hz(2);
+        sgn = detect_frf_polarity(2*pi*Freq(inb), Real(inb) + 1i*Imag(inb));
+    else
+        sgn = sign(cfg.polarity);
+    end
+    Real = sgn*Real; Imag = sgn*Imag;
+    fprintf('legacy: polarity %+d applied\n', sgn);
+end
 
 % row vectors throughout (column data broadcast to N x N further down)
 freq = Freq(:).';
@@ -88,6 +158,7 @@ imag_filtered = conv(imag_X_F_measured, b, 'same');
 % noise
 minFreq =0;                          % minimum FRF frequency
 maxFreq = 9000;                         % maximum FRF frequency
+if ~strcmpi(cfg.legacy_source, 'mat'), minFreq = cfg.f_band_Hz(1); maxFreq = cfg.f_band_Hz(2); end
 Freq_index = find(freq >= minFreq & freq <= maxFreq);
 freq = freq(Freq_index);
 omega = omega(Freq_index);
