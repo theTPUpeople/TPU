@@ -32,7 +32,7 @@ cfg.results_dir  = fullfile(cfg.data_root, 'results');
 cfg.disturbance_file      = fullfile(cfg.data_root, 'Disturbance Rejection Test', '0%', 'TPU0S1D.csv');
 cfg.transmissibility_file = fullfile(cfg.data_root, 'Transmissibility test', '0%', 'TPU0S1T.csv');
 cfg.plot_T_re_im = true;  % plot Re and Im of that transmissibility FRF against frequency (two figures)
-cfg.plot_smooth_points = 11; % smoothing of those two plots only: quadratic Savitzky-Golay window [bins, odd]; 1 = raw data
+cfg.plot_smooth_points = 11; % smoothing of those two curves (plots and the peak picking): quadratic Savitzky-Golay window [bins, odd]; 1 = raw data
 cfg.make_figures = true;
 cfg.run_mode     = 'batch'; % 'batch' | 'legacy'
 % legacy mode only (original hard-coded values kept as defaults)
@@ -80,15 +80,32 @@ Im_T        = A_T.*sin(phase_T_rad);        % Im = A sin(phase)
 fprintf('Read %d points from %s and %d points from %s (phase deg -> rad, Re = A cos, Im = A sin)\n', ...
     numel(freq_D), cfg.disturbance_file, numel(freq_T), cfg.transmissibility_file);
 
+% Smoothed curves (quadratic Savitzky-Golay, same filter as the T analysis); Re_T, Im_T stay raw
+m = floor(cfg.plot_smooth_points/2); sg = (3*(3*m^2 + 3*m - 1) - 15*(-m:m)'.^2)/((2*m + 1)*(4*m^2 + 4*m - 3));
+Re_T_plot = conv(Re_T, sg, 'same'); Re_T_plot([1:m, end-m+1:end]) = Re_T([1:m, end-m+1:end]);   % edge bins unsmoothed
+Im_T_plot = conv(Im_T, sg, 'same'); Im_T_plot([1:m, end-m+1:end]) = Im_T([1:m, end-m+1:end]);
+
+%% ------------- Peak picking (Schmitz & Smith, Sec. 2.5.1, Fig. 2.21) on these curves -------------
+% Point 1: minimum of the imaginary part -> natural frequency f_n, and its Y value A
+% Point 3: maximum of the real part below f_n;  point 4: minimum of the real part above f_n
+% Searched inside cfg.f_band_Hz, which leaves out the 0 Hz edge and the low-coherence data below 30 Hz.
+inb = find(freq_T >= cfg.f_band_Hz(1) & freq_T <= cfg.f_band_Hz(2));
+[A_T_pk, k] = min(Im_T_plot(inb));   i1_T = inb(k);          % point 1: Y value A of the Im minimum
+f1_T = freq_T(i1_T);                                           % point 1: f_n [Hz]
+below = inb(freq_T(inb) <= f1_T);    above = inb(freq_T(inb) >= f1_T);
+[Re3_T, k] = max(Re_T_plot(below)); i3_T = below(k); f3_T = freq_T(i3_T);   % point 3: Re max and its frequency
+[Re4_T, k] = min(Re_T_plot(above)); i4_T = above(k); f4_T = freq_T(i4_T);   % point 4: Re min and its frequency
+fprintf('Peak picking on %s (smoothed curves, %g-%g Hz):\n', cfg.transmissibility_file, cfg.f_band_Hz);
+fprintf('  point 1  Im minimum   f_n = %8.3f Hz (w_n = %8.2f rad/s)   A  = %8.4f [-]\n', f1_T, 2*pi*f1_T, A_T_pk);
+fprintf('  point 3  Re maximum   f_3 = %8.3f Hz (w_3 = %8.2f rad/s)   Re = %8.4f [-]\n', f3_T, 2*pi*f3_T, Re3_T);
+fprintf('  point 4  Re minimum   f_4 = %8.3f Hz (w_4 = %8.2f rad/s)   Re = %8.4f [-]\n', f4_T, 2*pi*f4_T, Re4_T);
+
 % Real and imaginary components of the transmissibility FRF versus frequency
 if cfg.plot_T_re_im
     [~, name_T] = fileparts(cfg.transmissibility_file);
     line_col = [42 120 214]/255;                  % single series: one hue
+    pt_col   = [235 104 52]/255;                  % picked points
     zero_col = [0.55 0.55 0.55];
-    % smoothing for the plots only (same quadratic Savitzky-Golay filter as the T analysis); Re_T, Im_T stay raw
-    m = floor(cfg.plot_smooth_points/2); sg = (3*(3*m^2 + 3*m - 1) - 15*(-m:m)'.^2)/((2*m + 1)*(4*m^2 + 4*m - 3));
-    Re_T_plot = conv(Re_T, sg, 'same'); Re_T_plot([1:m, end-m+1:end]) = Re_T([1:m, end-m+1:end]);   % edge bins unsmoothed
-    Im_T_plot = conv(Im_T, sg, 'same'); Im_T_plot([1:m, end-m+1:end]) = Im_T([1:m, end-m+1:end]);
     comp  = {Re_T_plot, Im_T_plot};
     ylab  = {'Real component  Re = A cos(\phi)  [-]', 'Imaginary component  Im = A sin(\phi)  [-]'};
     ttl   = {'real component', 'imaginary component'};
@@ -103,6 +120,16 @@ if cfg.plot_T_re_im
         ylabel(ylab{k});
         if m > 0, sm_txt = sprintf(' (smoothed: %d-point Savitzky-Golay)', 2*m + 1); else, sm_txt = ''; end
         title(sprintf('%s transmissibility FRF: %s%s', name_T, ttl{k}, sm_txt), 'Interpreter', 'none');
+        dx = 0.02*(freq_T(end) - freq_T(1));          % label offset to the right of each point
+        if k == 1          % points 3 and 4 on the real part
+            plot([f3_T f4_T], [Re3_T Re4_T], 'o', 'Color', pt_col, 'MarkerFaceColor', pt_col, 'MarkerSize', 8);
+            text(f3_T + dx, Re3_T, sprintf('3: %.2f Hz,  Re = %.3f', f3_T, Re3_T), 'FontSize', 11, 'VerticalAlignment', 'middle');
+            text(f4_T + dx, Re4_T, sprintf('4: %.2f Hz,  Re = %.3f', f4_T, Re4_T), 'FontSize', 11, 'VerticalAlignment', 'middle');
+        else               % point 1 and the peak value A on the imaginary part
+            plot([freq_T(1) f1_T], [A_T_pk A_T_pk], '--', 'Color', zero_col);
+            plot(f1_T, A_T_pk, 'o', 'Color', pt_col, 'MarkerFaceColor', pt_col, 'MarkerSize', 8);
+            text(f1_T + dx, A_T_pk, sprintf('1: f_n = %.2f Hz,  A = %.3f', f1_T, A_T_pk), 'FontSize', 11, 'VerticalAlignment', 'middle');
+        end
     end
 end
 
