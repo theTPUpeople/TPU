@@ -31,10 +31,14 @@ cfg.results_dir  = fullfile(cfg.data_root, 'results');
 % one specimen of each test, read at the top of this script (CSV exports, open in Excel)
 cfg.disturbance_file      = fullfile(cfg.data_root, 'Disturbance Rejection Test', '0%', 'TPU0S1D.csv');
 cfg.transmissibility_file = fullfile(cfg.data_root, 'Transmissibility test', '0%', 'TPU0S1T.csv');
-cfg.plot_T_re_im = true;  % plot Re and Im of that transmissibility FRF against frequency (two figures)
-cfg.plot_smooth_points = 11; % smoothing of those two curves (plots and the peak picking): quadratic Savitzky-Golay window [bins, odd]; 1 = raw data
-cfg.n_modes_T    = 1;   % modes fitted in the peak-picking block (Fig. 2.21 shows 2). TPU0S1T has one: its other Im minima
-                        % (51.95, 55.86, 57.03 Hz) lie on the flank of the 58.20 Hz dip
+% peak picking and modal parameters (process_modal_file.m): the same steps and settings for every
+% file and both experiment types (disturbance rejection and transmissibility)
+cfg.process_files      = {cfg.transmissibility_file};   % list of exports to process, any mix of D and T files
+cfg.pick_n_modes       = 1;     % modes fitted per file (Fig. 2.21 shows 2), chosen by looking at the plots (Example 2.5).
+                                % TPU0S1T has one: its other Im minima (51.95, 55.86, 57.03 Hz) lie on the 58.20 Hz dip
+cfg.pick_smooth_points = 11;    % quadratic Savitzky-Golay window [bins, odd] for the curves and the picking; 1 = raw data
+cfg.pick_show_plots    = true;  % open the real / imaginary figures of each file
+cfg.report_dir         = fullfile(cfg.results_dir, 'processed');   % "<file name> processed.pdf" is written here
 cfg.make_figures = true;
 cfg.run_mode     = 'batch'; % 'batch' | 'legacy'
 % legacy mode only (original hard-coded values kept as defaults)
@@ -82,133 +86,14 @@ Im_T        = A_T.*sin(phase_T_rad);        % Im = A sin(phase)
 fprintf('Read %d points from %s and %d points from %s (phase deg -> rad, Re = A cos, Im = A sin)\n', ...
     numel(freq_D), cfg.disturbance_file, numel(freq_T), cfg.transmissibility_file);
 
-% Smoothed curves (quadratic Savitzky-Golay, same filter as the T analysis); Re_T, Im_T stay raw
-m = floor(cfg.plot_smooth_points/2); sg = (3*(3*m^2 + 3*m - 1) - 15*(-m:m)'.^2)/((2*m + 1)*(4*m^2 + 4*m - 3));
-Re_T_plot = conv(Re_T, sg, 'same'); Re_T_plot([1:m, end-m+1:end]) = Re_T([1:m, end-m+1:end]);   % edge bins unsmoothed
-Im_T_plot = conv(Im_T, sg, 'same'); Im_T_plot([1:m, end-m+1:end]) = Im_T([1:m, end-m+1:end]);
-
-%% ------------- Peak picking and modal parameters (Schmitz & Smith, Sec. 2.5.1, pp. 42-43) -------------
-% Notation of Fig. 2.21 and Eqs. 2.58-2.63, written out by name:
-%   point 1, point 2   minima of the imaginary part     -> omega_n1, omega_n2 and the peak values A, B
-%   points 3, 4        max / min of the real part, mode 1 -> omega_3, omega_4
-%   points 5, 6        max / min of the real part, mode 2 -> omega_5, omega_6
-%   zeta_q1, zeta_q2 (damping ratios), k_q1, k_q2 (stiffness), m_q1, m_q2 (mass), c_q1, c_q2 (damping)
-% cfg.n_modes_T modes are fitted; the number is chosen by looking at the plots (textbook Example 2.5).
-% Search limited to cfg.f_band_Hz (leaves out the 0 Hz edge and the low-coherence data below 30 Hz).
-omega_T = 2*pi*freq_T;                                             % omega [rad/s]
-inb = find(freq_T >= cfg.f_band_Hz(1) & freq_T <= cfg.f_band_Hz(2));
-[~, k] = min(Im_T_plot(inb));  i_n = inb(k);                       % deepest minimum of the imaginary part
-if cfg.n_modes_T >= 2
-    % second mode: most prominent other minimum of the imaginary part that lies outside the
-    % real-part bracket of the first one (a minimum inside that bracket belongs to the same mode)
-    seg = inb(inb <= i_n); [~, k] = max(Re_T_plot(seg)); i_lo = seg(k);
-    seg = inb(inb >= i_n); [~, k] = min(Re_T_plot(seg)); i_hi = seg(k);
-    [ip, prom] = find_peaks_prominence(-Im_T_plot(inb));
-    cand = inb(ip);
-    keep = Im_T_plot(cand) < 0 & prom >= cfg.min_prominence_rel*max(abs(Im_T_plot(inb))) & (cand < i_lo | cand > i_hi);
-    cand = cand(keep); prom = prom(keep);
-    if ~isempty(cand)
-        [~, k] = max(prom);
-        i_n = sort([i_n; cand(k)]);                                % mode 1 = lower frequency (Fig. 2.21)
-    else
-        fprintf('No second mode found outside the first mode''s bracket: mode 2 values are NaN.\n');
-    end
-end
-has_mode2 = numel(i_n) == 2;
-if has_mode2, i_mid = round(mean(i_n)); else, i_mid = inb(end); end   % boundary between the two modes
-
-% point 1, and points 3 and 4 around it
-omega_n1 = omega_T(i_n(1));              A = Im_T_plot(i_n(1));    % point 1: natural frequency and peak value A
-seg = inb(inb <= i_n(1));                [~, k] = max(Re_T_plot(seg)); i_3 = seg(k);    % point 3: Re maximum
-seg = inb(inb >= i_n(1) & inb <= i_mid); [~, k] = min(Re_T_plot(seg)); i_4 = seg(k);    % point 4: Re minimum
-omega_3 = omega_T(i_3);                  omega_4 = omega_T(i_4);
-% point 2, and points 5 and 6 around it
-if has_mode2
-    omega_n2 = omega_T(i_n(2));          B = Im_T_plot(i_n(2));    % point 2: natural frequency and peak value B
-    seg = inb(inb >= i_mid & inb <= i_n(2)); [~, k] = max(Re_T_plot(seg)); i_5 = seg(k); % point 5: Re maximum
-    seg = inb(inb >= i_n(2));                [~, k] = min(Re_T_plot(seg)); i_6 = seg(k); % point 6: Re minimum
-    omega_5 = omega_T(i_5);              omega_6 = omega_T(i_6);
-else
-    omega_n2 = NaN; B = NaN; omega_5 = NaN; omega_6 = NaN;
-end
-
-% Eq. 2.58: omega_4 - omega_3 = omega_n1(1 + zeta_q1) - omega_n1(1 - zeta_q1) = 2 zeta_q1 omega_n1
-zeta_q1 = (omega_4 - omega_3)/(2*omega_n1);
-% Eq. 2.59
-zeta_q2 = (omega_6 - omega_5)/(2*omega_n2);
-% Eq. 2.60: A = -1/(2 k_q1 zeta_q1), so k_q1 = -1/(2 zeta_q1 A)
-k_q1 = -1/(2*zeta_q1*A);
-% Eq. 2.61
-k_q2 = -1/(2*zeta_q2*B);
-% Eq. 2.62: omega_n1 = sqrt(k_q1/m_q1), so m_q1 = k_q1/omega_n1^2 and m_q2 = k_q2/omega_n2^2
-m_q1 = k_q1/omega_n1^2;
-m_q2 = k_q2/omega_n2^2;
-% Eq. 2.63: zeta_q1 = c_q1/(2 sqrt(k_q1 m_q1)), so c_q1 = 2 zeta_q1 sqrt(k_q1 m_q1) and c_q2 = 2 zeta_q2 sqrt(k_q2 m_q2)
-c_q1 = 2*zeta_q1*sqrt(k_q1*m_q1);
-c_q2 = 2*zeta_q2*sqrt(k_q2*m_q2);
-% modal matrices [K_q], [M_q], [C_q] (p. 43), one diagonal entry per fitted mode
-n_q = 1 + has_mode2;
-k_q_list = [k_q1 k_q2]; m_q_list = [m_q1 m_q2]; c_q_list = [c_q1 c_q2];
-K_q = diag(k_q_list(1:n_q));
-M_q = diag(m_q_list(1:n_q));
-C_q = diag(c_q_list(1:n_q));
-
-% This FRF is a transmissibility (accel/accel, no force), so A and B are dimensionless and
-% k_q, m_q, c_q come out in [-], [s^2], [s], not N/m, kg, N s/m. For a single-mode base-excited
-% system Im(T) = -1/(2 zeta) at resonance, so Eq. 2.60 gives k_q1 close to 1 there.
-fprintf('Peak picking on %s (smoothed curves, %g-%g Hz), %d mode(s):\n', cfg.transmissibility_file, cfg.f_band_Hz, n_q);
-fprintf('  point 1: omega_n1 = %9.2f rad/s (%8.3f Hz)   A = %10.4g [-]\n', omega_n1, omega_n1/(2*pi), A);
-fprintf('  point 3: omega_3  = %9.2f rad/s (%8.3f Hz)   Re = %10.4g [-]\n', omega_3, omega_3/(2*pi), Re_T_plot(i_3));
-fprintf('  point 4: omega_4  = %9.2f rad/s (%8.3f Hz)   Re = %10.4g [-]\n', omega_4, omega_4/(2*pi), Re_T_plot(i_4));
-if has_mode2
-    fprintf('  point 2: omega_n2 = %9.2f rad/s (%8.3f Hz)   B = %10.4g [-]\n', omega_n2, omega_n2/(2*pi), B);
-    fprintf('  point 5: omega_5  = %9.2f rad/s (%8.3f Hz)   Re = %10.4g [-]\n', omega_5, omega_5/(2*pi), Re_T_plot(i_5));
-    fprintf('  point 6: omega_6  = %9.2f rad/s (%8.3f Hz)   Re = %10.4g [-]\n', omega_6, omega_6/(2*pi), Re_T_plot(i_6));
-end
-fprintf('  Eq. 2.58 zeta_q1 = %.4f   Eq. 2.60 k_q1 = %.4f [-]   Eq. 2.62 m_q1 = %.4e [s^2]   Eq. 2.63 c_q1 = %.4e [s]\n', ...
-    zeta_q1, k_q1, m_q1, c_q1);
-fprintf('  Eq. 2.59 zeta_q2 = %.4f   Eq. 2.61 k_q2 = %.4f [-]   Eq. 2.62 m_q2 = %.4e [s^2]   Eq. 2.63 c_q2 = %.4e [s]\n', ...
-    zeta_q2, k_q2, m_q2, c_q2);
-
-% Real and imaginary components of the transmissibility FRF versus frequency
-if cfg.plot_T_re_im
-    [~, name_T] = fileparts(cfg.transmissibility_file);
-    line_col = [42 120 214]/255;                  % single series: one hue
-    pt_col   = [235 104 52]/255;                  % picked points
-    zero_col = [0.55 0.55 0.55];
-    comp  = {Re_T_plot, Im_T_plot};
-    ylab  = {'Real component  Re = A cos(\phi)  [-]', 'Imaginary component  Im = A sin(\phi)  [-]'};
-    ttl   = {'real component', 'imaginary component'};
-    if has_mode2, re_pts = [i_3 i_4 i_5 i_6]; im_pts = i_n(:)'; else, re_pts = [i_3 i_4]; im_pts = i_n(1); end
-    re_lab = 3:(2 + numel(re_pts));               % points 3, 4 (, 5, 6)
-    im_val = {'A', 'B'};
-    for k = 1:2
-        figure('Color', 'w', 'Name', [name_T ' ' ttl{k}]);
-        plot(freq_T, comp{k}, '-', 'Color', line_col, 'LineWidth', 1.5); hold on
-        plot([freq_T(1) freq_T(end)], [0 0], ':', 'Color', zero_col);
-        grid on; box on
-        set(gca, 'FontSize', 12);
-        xlim([freq_T(1) freq_T(end)]);
-        xlabel('Frequency [Hz]');
-        ylabel(ylab{k});
-        if m > 0, sm_txt = sprintf(' (smoothed: %d-point Savitzky-Golay)', 2*m + 1); else, sm_txt = ''; end
-        title(sprintf('%s transmissibility FRF: %s%s', name_T, ttl{k}, sm_txt), 'Interpreter', 'none');
-        dx = 0.02*(freq_T(end) - freq_T(1));          % label offset to the right of each point
-        if k == 1          % points 3, 4 (, 5, 6) on the real part
-            plot(freq_T(re_pts), Re_T_plot(re_pts), 'o', 'Color', pt_col, 'MarkerFaceColor', pt_col, 'MarkerSize', 8);
-            for j = 1:numel(re_pts)
-                text(freq_T(re_pts(j)) + dx, Re_T_plot(re_pts(j)), sprintf('%d: %.2f Hz,  Re = %.3f', re_lab(j), ...
-                    freq_T(re_pts(j)), Re_T_plot(re_pts(j))), 'FontSize', 11, 'VerticalAlignment', 'middle');
-            end
-        else               % points 1 (, 2) and the peak values A (, B) on the imaginary part
-            for j = 1:numel(im_pts)
-                plot([freq_T(1) freq_T(im_pts(j))], Im_T_plot(im_pts(j))*[1 1], '--', 'Color', zero_col);
-                plot(freq_T(im_pts(j)), Im_T_plot(im_pts(j)), 'o', 'Color', pt_col, 'MarkerFaceColor', pt_col, 'MarkerSize', 8);
-                text(freq_T(im_pts(j)) + dx, Im_T_plot(im_pts(j)), sprintf('%d: f_{n%d} = %.2f Hz,  %s = %.3f', j, j, ...
-                    freq_T(im_pts(j)), im_val{j}, Im_T_plot(im_pts(j))), 'FontSize', 11, 'VerticalAlignment', 'middle');
-            end
-        end
-    end
+%% ------------- Peak picking and modal parameters for every file in cfg.process_files -------------
+% process_modal_file.m applies the same steps to each file: read -> Re = A cos(phase), Im = A sin(phase)
+% -> (accelerance only) receptance H/(-omega^2) -> Fig. 2.21 sign -> smoothing -> points 1-6
+% -> Eqs. 2.58-2.63 and K_q, M_q, C_q -> plots -> "<file name> processed.pdf" in cfg.report_dir.
+% The results (named after the textbook symbols) are collected in the struct array "processed".
+clear processed
+for i_file = 1:numel(cfg.process_files)
+    processed(i_file) = process_modal_file(cfg.process_files{i_file}, cfg); %#ok<SAGROW>
 end
 
 if strcmpi(cfg.run_mode, 'batch')
