@@ -31,13 +31,11 @@ cfg.results_dir  = fullfile(cfg.data_root, 'results');
 % one specimen of each test, read at the top of this script (CSV exports, open in Excel)
 cfg.disturbance_file      = fullfile(cfg.data_root, 'Disturbance Rejection Test', '0%', 'TPU0S1D.csv');
 cfg.transmissibility_file = fullfile(cfg.data_root, 'Transmissibility test', '0%', 'TPU0S1T.csv');
-% peak picking and modal parameters (process_modal_file.m): the same steps and settings for every
-% file and both experiment types (disturbance rejection and transmissibility)
+% SDOF peak picking and modal parameters (process_modal_file.m): the same steps and settings for
+% every file and both experiment types (disturbance rejection and transmissibility)
 cfg.process_files      = {cfg.transmissibility_file};   % list of exports to process, any mix of D and T files
-cfg.pick_n_modes       = 1;     % modes fitted per file (Fig. 2.21 shows 2), chosen by looking at the plots (Example 2.5).
-                                % TPU0S1T has one: its other Im minima (51.95, 55.86, 57.03 Hz) lie on the 58.20 Hz dip
 cfg.pick_smooth_points = 11;    % quadratic Savitzky-Golay window [bins, odd] for the curves and the picking; 1 = raw data
-cfg.pick_show_plots    = true;  % open the real / imaginary figures of each file
+cfg.pick_show_plots    = true;  % open the raw-magnitude, real and imaginary figures of each file
 cfg.report_dir         = fullfile(cfg.results_dir, 'processed');   % "<file name> processed.pdf" is written here
 cfg.make_figures = true;
 cfg.run_mode     = 'batch'; % 'batch' | 'legacy'
@@ -87,9 +85,11 @@ fprintf('Read %d points from %s and %d points from %s (phase deg -> rad, Re = A 
     numel(freq_D), cfg.disturbance_file, numel(freq_T), cfg.transmissibility_file);
 
 %% ------------- Peak picking and modal parameters for every file in cfg.process_files -------------
-% process_modal_file.m applies the same steps to each file: read -> Re = A cos(phase), Im = A sin(phase)
-% -> (accelerance only) receptance H/(-omega^2) -> Fig. 2.21 sign -> smoothing -> points 1-6
-% -> Eqs. 2.58-2.63 and K_q, M_q, C_q -> plots -> "<file name> processed.pdf" in cfg.report_dir.
+% process_modal_file.m applies the same SDOF steps to each file: read -> Re = A cos(phase), Im = A sin(phase)
+% -> (accelerance only) receptance H/(-omega^2) -> Fig. 2.21 sign -> smoothing
+% -> natural frequency from the raw data (maximum of the measured FRF magnitude)
+% -> point 1 (Im minimum: omega_n1, A), point 3 (biggest Re maximum), point 4 (biggest Re minimum)
+% -> Eqs. 2.58, 2.60, 2.62, 2.63 -> plots -> "<file name> processed.pdf" in cfg.report_dir.
 % The results (named after the textbook symbols) are collected in the struct array "processed".
 clear processed
 for i_file = 1:numel(cfg.process_files)
