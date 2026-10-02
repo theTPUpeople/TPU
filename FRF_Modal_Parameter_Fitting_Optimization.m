@@ -33,6 +33,8 @@ cfg.disturbance_file      = fullfile(cfg.data_root, 'Disturbance Rejection Test'
 cfg.transmissibility_file = fullfile(cfg.data_root, 'Transmissibility test', '0%', 'TPU0S1T.csv');
 cfg.plot_T_re_im = true;  % plot Re and Im of that transmissibility FRF against frequency (two figures)
 cfg.plot_smooth_points = 11; % smoothing of those two curves (plots and the peak picking): quadratic Savitzky-Golay window [bins, odd]; 1 = raw data
+cfg.n_modes_T    = 1;   % modes fitted in the peak-picking block (Fig. 2.21 shows 2). TPU0S1T has one: its other Im minima
+                        % (51.95, 55.86, 57.03 Hz) lie on the flank of the 58.20 Hz dip
 cfg.make_figures = true;
 cfg.run_mode     = 'batch'; % 'batch' | 'legacy'
 % legacy mode only (original hard-coded values kept as defaults)
@@ -85,20 +87,88 @@ m = floor(cfg.plot_smooth_points/2); sg = (3*(3*m^2 + 3*m - 1) - 15*(-m:m)'.^2)/
 Re_T_plot = conv(Re_T, sg, 'same'); Re_T_plot([1:m, end-m+1:end]) = Re_T([1:m, end-m+1:end]);   % edge bins unsmoothed
 Im_T_plot = conv(Im_T, sg, 'same'); Im_T_plot([1:m, end-m+1:end]) = Im_T([1:m, end-m+1:end]);
 
-%% ------------- Peak picking (Schmitz & Smith, Sec. 2.5.1, Fig. 2.21) on these curves -------------
-% Point 1: minimum of the imaginary part -> natural frequency f_n, and its Y value A
-% Point 3: maximum of the real part below f_n;  point 4: minimum of the real part above f_n
-% Searched inside cfg.f_band_Hz, which leaves out the 0 Hz edge and the low-coherence data below 30 Hz.
+%% ------------- Peak picking and modal parameters (Schmitz & Smith, Sec. 2.5.1, pp. 42-43) -------------
+% Notation of Fig. 2.21 and Eqs. 2.58-2.63, written out by name:
+%   point 1, point 2   minima of the imaginary part     -> omega_n1, omega_n2 and the peak values A, B
+%   points 3, 4        max / min of the real part, mode 1 -> omega_3, omega_4
+%   points 5, 6        max / min of the real part, mode 2 -> omega_5, omega_6
+%   zeta_q1, zeta_q2 (damping ratios), k_q1, k_q2 (stiffness), m_q1, m_q2 (mass), c_q1, c_q2 (damping)
+% cfg.n_modes_T modes are fitted; the number is chosen by looking at the plots (textbook Example 2.5).
+% Search limited to cfg.f_band_Hz (leaves out the 0 Hz edge and the low-coherence data below 30 Hz).
+omega_T = 2*pi*freq_T;                                             % omega [rad/s]
 inb = find(freq_T >= cfg.f_band_Hz(1) & freq_T <= cfg.f_band_Hz(2));
-[A_T_pk, k] = min(Im_T_plot(inb));   i1_T = inb(k);          % point 1: Y value A of the Im minimum
-f1_T = freq_T(i1_T);                                           % point 1: f_n [Hz]
-below = inb(freq_T(inb) <= f1_T);    above = inb(freq_T(inb) >= f1_T);
-[Re3_T, k] = max(Re_T_plot(below)); i3_T = below(k); f3_T = freq_T(i3_T);   % point 3: Re max and its frequency
-[Re4_T, k] = min(Re_T_plot(above)); i4_T = above(k); f4_T = freq_T(i4_T);   % point 4: Re min and its frequency
-fprintf('Peak picking on %s (smoothed curves, %g-%g Hz):\n', cfg.transmissibility_file, cfg.f_band_Hz);
-fprintf('  point 1  Im minimum   f_n = %8.3f Hz (w_n = %8.2f rad/s)   A  = %8.4f [-]\n', f1_T, 2*pi*f1_T, A_T_pk);
-fprintf('  point 3  Re maximum   f_3 = %8.3f Hz (w_3 = %8.2f rad/s)   Re = %8.4f [-]\n', f3_T, 2*pi*f3_T, Re3_T);
-fprintf('  point 4  Re minimum   f_4 = %8.3f Hz (w_4 = %8.2f rad/s)   Re = %8.4f [-]\n', f4_T, 2*pi*f4_T, Re4_T);
+[~, k] = min(Im_T_plot(inb));  i_n = inb(k);                       % deepest minimum of the imaginary part
+if cfg.n_modes_T >= 2
+    % second mode: most prominent other minimum of the imaginary part that lies outside the
+    % real-part bracket of the first one (a minimum inside that bracket belongs to the same mode)
+    seg = inb(inb <= i_n); [~, k] = max(Re_T_plot(seg)); i_lo = seg(k);
+    seg = inb(inb >= i_n); [~, k] = min(Re_T_plot(seg)); i_hi = seg(k);
+    [ip, prom] = find_peaks_prominence(-Im_T_plot(inb));
+    cand = inb(ip);
+    keep = Im_T_plot(cand) < 0 & prom >= cfg.min_prominence_rel*max(abs(Im_T_plot(inb))) & (cand < i_lo | cand > i_hi);
+    cand = cand(keep); prom = prom(keep);
+    if ~isempty(cand)
+        [~, k] = max(prom);
+        i_n = sort([i_n; cand(k)]);                                % mode 1 = lower frequency (Fig. 2.21)
+    else
+        fprintf('No second mode found outside the first mode''s bracket: mode 2 values are NaN.\n');
+    end
+end
+has_mode2 = numel(i_n) == 2;
+if has_mode2, i_mid = round(mean(i_n)); else, i_mid = inb(end); end   % boundary between the two modes
+
+% point 1, and points 3 and 4 around it
+omega_n1 = omega_T(i_n(1));              A = Im_T_plot(i_n(1));    % point 1: natural frequency and peak value A
+seg = inb(inb <= i_n(1));                [~, k] = max(Re_T_plot(seg)); i_3 = seg(k);    % point 3: Re maximum
+seg = inb(inb >= i_n(1) & inb <= i_mid); [~, k] = min(Re_T_plot(seg)); i_4 = seg(k);    % point 4: Re minimum
+omega_3 = omega_T(i_3);                  omega_4 = omega_T(i_4);
+% point 2, and points 5 and 6 around it
+if has_mode2
+    omega_n2 = omega_T(i_n(2));          B = Im_T_plot(i_n(2));    % point 2: natural frequency and peak value B
+    seg = inb(inb >= i_mid & inb <= i_n(2)); [~, k] = max(Re_T_plot(seg)); i_5 = seg(k); % point 5: Re maximum
+    seg = inb(inb >= i_n(2));                [~, k] = min(Re_T_plot(seg)); i_6 = seg(k); % point 6: Re minimum
+    omega_5 = omega_T(i_5);              omega_6 = omega_T(i_6);
+else
+    omega_n2 = NaN; B = NaN; omega_5 = NaN; omega_6 = NaN;
+end
+
+% Eq. 2.58: omega_4 - omega_3 = omega_n1(1 + zeta_q1) - omega_n1(1 - zeta_q1) = 2 zeta_q1 omega_n1
+zeta_q1 = (omega_4 - omega_3)/(2*omega_n1);
+% Eq. 2.59
+zeta_q2 = (omega_6 - omega_5)/(2*omega_n2);
+% Eq. 2.60: A = -1/(2 k_q1 zeta_q1), so k_q1 = -1/(2 zeta_q1 A)
+k_q1 = -1/(2*zeta_q1*A);
+% Eq. 2.61
+k_q2 = -1/(2*zeta_q2*B);
+% Eq. 2.62: omega_n1 = sqrt(k_q1/m_q1), so m_q1 = k_q1/omega_n1^2 and m_q2 = k_q2/omega_n2^2
+m_q1 = k_q1/omega_n1^2;
+m_q2 = k_q2/omega_n2^2;
+% Eq. 2.63: zeta_q1 = c_q1/(2 sqrt(k_q1 m_q1)), so c_q1 = 2 zeta_q1 sqrt(k_q1 m_q1) and c_q2 = 2 zeta_q2 sqrt(k_q2 m_q2)
+c_q1 = 2*zeta_q1*sqrt(k_q1*m_q1);
+c_q2 = 2*zeta_q2*sqrt(k_q2*m_q2);
+% modal matrices [K_q], [M_q], [C_q] (p. 43), one diagonal entry per fitted mode
+n_q = 1 + has_mode2;
+k_q_list = [k_q1 k_q2]; m_q_list = [m_q1 m_q2]; c_q_list = [c_q1 c_q2];
+K_q = diag(k_q_list(1:n_q));
+M_q = diag(m_q_list(1:n_q));
+C_q = diag(c_q_list(1:n_q));
+
+% This FRF is a transmissibility (accel/accel, no force), so A and B are dimensionless and
+% k_q, m_q, c_q come out in [-], [s^2], [s], not N/m, kg, N s/m. For a single-mode base-excited
+% system Im(T) = -1/(2 zeta) at resonance, so Eq. 2.60 gives k_q1 close to 1 there.
+fprintf('Peak picking on %s (smoothed curves, %g-%g Hz), %d mode(s):\n', cfg.transmissibility_file, cfg.f_band_Hz, n_q);
+fprintf('  point 1: omega_n1 = %9.2f rad/s (%8.3f Hz)   A = %10.4g [-]\n', omega_n1, omega_n1/(2*pi), A);
+fprintf('  point 3: omega_3  = %9.2f rad/s (%8.3f Hz)   Re = %10.4g [-]\n', omega_3, omega_3/(2*pi), Re_T_plot(i_3));
+fprintf('  point 4: omega_4  = %9.2f rad/s (%8.3f Hz)   Re = %10.4g [-]\n', omega_4, omega_4/(2*pi), Re_T_plot(i_4));
+if has_mode2
+    fprintf('  point 2: omega_n2 = %9.2f rad/s (%8.3f Hz)   B = %10.4g [-]\n', omega_n2, omega_n2/(2*pi), B);
+    fprintf('  point 5: omega_5  = %9.2f rad/s (%8.3f Hz)   Re = %10.4g [-]\n', omega_5, omega_5/(2*pi), Re_T_plot(i_5));
+    fprintf('  point 6: omega_6  = %9.2f rad/s (%8.3f Hz)   Re = %10.4g [-]\n', omega_6, omega_6/(2*pi), Re_T_plot(i_6));
+end
+fprintf('  Eq. 2.58 zeta_q1 = %.4f   Eq. 2.60 k_q1 = %.4f [-]   Eq. 2.62 m_q1 = %.4e [s^2]   Eq. 2.63 c_q1 = %.4e [s]\n', ...
+    zeta_q1, k_q1, m_q1, c_q1);
+fprintf('  Eq. 2.59 zeta_q2 = %.4f   Eq. 2.61 k_q2 = %.4f [-]   Eq. 2.62 m_q2 = %.4e [s^2]   Eq. 2.63 c_q2 = %.4e [s]\n', ...
+    zeta_q2, k_q2, m_q2, c_q2);
 
 % Real and imaginary components of the transmissibility FRF versus frequency
 if cfg.plot_T_re_im
@@ -109,6 +179,9 @@ if cfg.plot_T_re_im
     comp  = {Re_T_plot, Im_T_plot};
     ylab  = {'Real component  Re = A cos(\phi)  [-]', 'Imaginary component  Im = A sin(\phi)  [-]'};
     ttl   = {'real component', 'imaginary component'};
+    if has_mode2, re_pts = [i_3 i_4 i_5 i_6]; im_pts = i_n(:)'; else, re_pts = [i_3 i_4]; im_pts = i_n(1); end
+    re_lab = 3:(2 + numel(re_pts));               % points 3, 4 (, 5, 6)
+    im_val = {'A', 'B'};
     for k = 1:2
         figure('Color', 'w', 'Name', [name_T ' ' ttl{k}]);
         plot(freq_T, comp{k}, '-', 'Color', line_col, 'LineWidth', 1.5); hold on
@@ -121,14 +194,19 @@ if cfg.plot_T_re_im
         if m > 0, sm_txt = sprintf(' (smoothed: %d-point Savitzky-Golay)', 2*m + 1); else, sm_txt = ''; end
         title(sprintf('%s transmissibility FRF: %s%s', name_T, ttl{k}, sm_txt), 'Interpreter', 'none');
         dx = 0.02*(freq_T(end) - freq_T(1));          % label offset to the right of each point
-        if k == 1          % points 3 and 4 on the real part
-            plot([f3_T f4_T], [Re3_T Re4_T], 'o', 'Color', pt_col, 'MarkerFaceColor', pt_col, 'MarkerSize', 8);
-            text(f3_T + dx, Re3_T, sprintf('3: %.2f Hz,  Re = %.3f', f3_T, Re3_T), 'FontSize', 11, 'VerticalAlignment', 'middle');
-            text(f4_T + dx, Re4_T, sprintf('4: %.2f Hz,  Re = %.3f', f4_T, Re4_T), 'FontSize', 11, 'VerticalAlignment', 'middle');
-        else               % point 1 and the peak value A on the imaginary part
-            plot([freq_T(1) f1_T], [A_T_pk A_T_pk], '--', 'Color', zero_col);
-            plot(f1_T, A_T_pk, 'o', 'Color', pt_col, 'MarkerFaceColor', pt_col, 'MarkerSize', 8);
-            text(f1_T + dx, A_T_pk, sprintf('1: f_n = %.2f Hz,  A = %.3f', f1_T, A_T_pk), 'FontSize', 11, 'VerticalAlignment', 'middle');
+        if k == 1          % points 3, 4 (, 5, 6) on the real part
+            plot(freq_T(re_pts), Re_T_plot(re_pts), 'o', 'Color', pt_col, 'MarkerFaceColor', pt_col, 'MarkerSize', 8);
+            for j = 1:numel(re_pts)
+                text(freq_T(re_pts(j)) + dx, Re_T_plot(re_pts(j)), sprintf('%d: %.2f Hz,  Re = %.3f', re_lab(j), ...
+                    freq_T(re_pts(j)), Re_T_plot(re_pts(j))), 'FontSize', 11, 'VerticalAlignment', 'middle');
+            end
+        else               % points 1 (, 2) and the peak values A (, B) on the imaginary part
+            for j = 1:numel(im_pts)
+                plot([freq_T(1) freq_T(im_pts(j))], Im_T_plot(im_pts(j))*[1 1], '--', 'Color', zero_col);
+                plot(freq_T(im_pts(j)), Im_T_plot(im_pts(j)), 'o', 'Color', pt_col, 'MarkerFaceColor', pt_col, 'MarkerSize', 8);
+                text(freq_T(im_pts(j)) + dx, Im_T_plot(im_pts(j)), sprintf('%d: f_{n%d} = %.2f Hz,  %s = %.3f', j, j, ...
+                    freq_T(im_pts(j)), im_val{j}, Im_T_plot(im_pts(j))), 'FontSize', 11, 'VerticalAlignment', 'middle');
+            end
         end
     end
 end
@@ -357,16 +435,18 @@ for cnt1 = 1:num_modes
         f2(cnt1) = f_range(f1_locs);
     end
     
-    wn(cnt1) = fn(cnt1)*(2*pi);                 % convert to [rad/s]
-    w1(cnt1) = f1(cnt1)*(2*pi);                 % convert to [rad/s]
-    w2(cnt1) = f2(cnt1)*(2*pi);                 % convert to [rad/s]
+    % Textbook notation (Sec. 2.5.1, Fig. 2.21): for mode 1 omega_n = omega_n1, omega_low = omega_3,
+    % omega_high = omega_4 and A = A; for mode 2 omega_n = omega_n2, omega_low = omega_5, omega_high = omega_6, A = B.
+    omega_n(cnt1) = fn(cnt1)*(2*pi);            % natural frequency (point 1 / 2) [rad/s]
+    omega_low(cnt1) = f1(cnt1)*(2*pi);          % Re maximum below omega_n (point 3 / 5) [rad/s]
+    omega_high(cnt1) = f2(cnt1)*(2*pi);         % Re minimum above omega_n (point 4 / 6) [rad/s]
     
-    zeta_q(cnt1) = (w2(cnt1)-w1(cnt1))/(2*wn(cnt1));            % modal damping ratio [unitless]
-    k_q(cnt1) = -1/(2*zeta_q(cnt1)*A(cnt1));                    % modal stiffness [N/m]
-    m_q(cnt1) = k_q(cnt1)/wn(cnt1)^2;                           % modal mass [kg]
-    c_q(cnt1) = 2*zeta_q(cnt1)*sqrt(k_q(cnt1)*m_q(cnt1));       % modal damping coefficient [(N-s)/m]
+    zeta_q(cnt1) = (omega_high(cnt1)-omega_low(cnt1))/(2*omega_n(cnt1));   % Eq. 2.58 / 2.59: modal damping ratio [unitless]
+    k_q(cnt1) = -1/(2*zeta_q(cnt1)*A(cnt1));                    % Eq. 2.60 / 2.61: modal stiffness [N/m]
+    m_q(cnt1) = k_q(cnt1)/omega_n(cnt1)^2;                      % Eq. 2.62: modal mass [kg]
+    c_q(cnt1) = 2*zeta_q(cnt1)*sqrt(k_q(cnt1)*m_q(cnt1));       % Eq. 2.63: modal damping coefficient [(N-s)/m]
     
-    r = (omega/wn(cnt1));
+    r = (omega/omega_n(cnt1));
     Q_R(cnt1,:) = (1/k_q(cnt1))*(((1-r.^2)-1i*(2*zeta_q(cnt1)*r))./((1-r.^2).^2+(2*zeta_q(cnt1)*r).^2));
     real_Q_R(cnt1,:) = real(Q_R(cnt1,:));
     imag_Q_R(cnt1,:) = imag(Q_R(cnt1,:));
@@ -399,7 +479,14 @@ for cnt1 = 1:num_modes
     ylabel('Imaginary[N/N]')
     hold on
 end
-x0 = [wn; k_q; zeta_q];
+% Order the modes by frequency so that index q follows the textbook numbering (mode 1 = lowest
+% omega_n); the loop above handled them from the deepest imaginary peak down.
+[~, q_order] = sort(fn);
+fn = fn(q_order); f1 = f1(q_order); f2 = f2(q_order); A = A(q_order);
+omega_n = omega_n(q_order); omega_low = omega_low(q_order); omega_high = omega_high(q_order);
+zeta_q = zeta_q(q_order); k_q = k_q(q_order); m_q = m_q(q_order); c_q = c_q(q_order);
+
+x0 = [omega_n; k_q; zeta_q];
 x0 = x0(:)';
 
 
@@ -455,10 +542,16 @@ Q_R_Real = real(Q_R_total);
 Q_R_Imag = imag(Q_R_total); 
 
 for cnt = 1:num_modes
-    fn(cnt) = x(1 + (cnt - 1)*3)/(2*pi);
+    omega_n(cnt) = x(1 + (cnt - 1)*3);
+    fn(cnt) = omega_n(cnt)/(2*pi);
     k_q(cnt) = x(2 + (cnt - 1)*3);
     zeta_q(cnt) = x(3 + (cnt - 1)*3);
+    m_q(cnt) = k_q(cnt)/omega_n(cnt)^2;                         % Eq. 2.62 with the optimised omega_n, k_q
+    c_q(cnt) = 2*zeta_q(cnt)*sqrt(k_q(cnt)*m_q(cnt));           % Eq. 2.63 with the optimised zeta_q, k_q, m_q
 end
+K_q = diag(k_q);                                                % modal matrices [K_q], [M_q], [C_q] (p. 43)
+M_q = diag(m_q);
+C_q = diag(c_q);
 
 figure(9)
 subplot(211)
